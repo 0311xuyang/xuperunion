@@ -57,6 +57,14 @@ enum TransactionStatus {
 // Xchain is the main interfaces
 service Xchain {
 
+  // SelectUTXOBySize merge many utxos into a few of utxos
+  rpc SelectUTXOBySize(UtxoInput) returns (UtxoOutput) {
+    option (google.api.http) = {
+      post : "/v1/select_utxo_by_size"
+      body : "*"
+    };
+  }
+
   // PostTx post Transaction to a node
   rpc PostTx(TxStatus) returns (CommonReply) {
     option (google.api.http) = {
@@ -68,6 +76,13 @@ service Xchain {
   rpc QueryACL(AclStatus) returns (AclStatus) {
     option (google.api.http) = {
       post : "/v1/query_acl"
+      body : "*"
+    };
+  }
+
+  rpc QueryUtxoRecord(UtxoRecordDetail) returns (UtxoRecordDetail) {
+    option (google.api.http) = {
+      post : "/v1/query_utxo_record"
       body : "*"
     };
   }
@@ -170,7 +185,12 @@ service Xchain {
   }
 
   // PreExecWithSelectUTXO preExec & selectUtxo
-  rpc PreExecWithSelectUTXO(PreExecWithSelectUTXORequest) returns (PreExecWithSelectUTXOResponse);
+  rpc PreExecWithSelectUTXO(PreExecWithSelectUTXORequest) returns (PreExecWithSelectUTXOResponse) {
+    option (google.api.http) = {
+      post : "/v1/preexec_select_utxo"
+      body : "*"
+    };
+  }
 
   // Native code deploy interface
   rpc DeployNativeCode(DeployNativeCodeRequest)
@@ -211,7 +231,12 @@ service Xchain {
   }
 
   //预执行合约
-  rpc PreExec(InvokeRPCRequest) returns (InvokeRPCResponse);
+  rpc PreExec(InvokeRPCRequest) returns (InvokeRPCResponse) {
+    option (google.api.http) = {
+      post : "/v1/preexec"
+      body : "*"
+    };
+  }
 }
 
 message Header {
@@ -400,6 +425,8 @@ message Transaction {
   int64 received_timestamp = 30;
   // 统一签名(支持多重签名/环签名等，与initiator_signs/auth_require_signs不同时使用)
   XuperSignature xuper_sign = 31;
+  // 可修改区块链标记
+  ModifyBlock modify_block = 32;
 }
 
 // Ledger metadata
@@ -410,14 +437,6 @@ message LedgerMeta {
   bytes tip_blockid = 2;
   // the height of the trunk
   int64 trunk_height = 3;
-  // max block size
-  int64 max_block_size = 4;
-  // preset contracts
-  repeated InvokeRequest reserved_contracts = 5;
-  // reset forbidden contract configuration
-  InvokeRequest forbidden_contract = 6;
-  // the resource amount of creating an account
-  int64 new_account_resource_amount = 7;
 }
 
 // Utxo metadata
@@ -427,6 +446,20 @@ message UtxoMeta {
   string utxo_total = 3;       // 当前utxo vm上的总资产
   int64 avgDelay = 4;          // 平均上链延时
   int64 unconfirmTxAmount = 5; // 待确认交易量
+  int64 max_block_size = 6;    // max block size
+  repeated InvokeRequest reserved_contracts = 7;       // preset contracts
+  InvokeRequest forbidden_contract = 8;        // reset forbidden contract configuration
+  int64 new_account_resource_amount = 9;	// the resource amount of creating an account
+  int64 irreversibleBlockHeight = 10;	// 当前不可逆区块高度，与utxo对齐
+  int64 irreversibleSlideWindow = 11;	// 当前不可逆区块高度调整窗口
+  GasPrice gasPrice = 12;
+}
+
+message GasPrice {
+  int64 cpu_rate = 1;
+  int64 mem_rate = 2;
+  int64 disk_rate = 3;
+  int64 xfee_rate = 4;
 }
 
 // The internal block struct
@@ -484,6 +517,8 @@ message BCStatus {
   InternalBlock block = 4;
   // Utox information
   UtxoMeta utxoMeta = 5;
+  // Branch info
+  repeated string branchBlockid = 6;
 }
 
 message BCTipStatus {
@@ -752,6 +787,9 @@ message InvokeRequest {
   string method_name = 3;
   map<string, bytes> args = 4;
   repeated ResourceLimit resource_limits = 5;
+  // amount is the amount transfer to the contract
+  // attention: In one transaction, transfer to only one contract is allowed
+  string amount = 6;
 }
 
 // 预执行的返回结构
@@ -762,6 +800,8 @@ message InvokeResponse {
   int64 gas_used = 4;
   repeated InvokeRequest requests = 5;
   repeated ContractResponse responses = 6;
+  repeated TxInput utxoInputs = 7;
+  repeated TxOutput utxoOutputs = 8;
 }
 
 // 扩展输入
@@ -911,4 +951,39 @@ message ContractResponse {
   int32  status = 1;
   string message = 2;
   bytes  body = 3;
+}
+
+message ModifyBlock {
+  // txid交易被effective_txid的交易提出可修改区块链的请求
+  string effective_txid = 1;
+  // 本交易是否已被修改标记
+  bool marked = 2;
+  // txid交易被修改生效的高度
+  int64 effective_height = 3;
+  // 监管的public key
+  string public_key = 4;
+  // 监管地址对修改的交易id的签名
+  string sign = 5;
+}
+
+message UtxoRecordDetail {
+  Header header = 1;
+  string bcname = 2;
+  string accountName = 3; 
+  UtxoRecord openUtxoRecord = 4;
+  UtxoRecord lockedUtxoRecord = 5;
+  UtxoRecord frozenUtxoRecord = 6;
+  int64 displayCount = 7;
+}
+
+message UtxoRecord {
+  string utxoCount = 1;
+  string utxoAmount = 2;
+  repeated UtxoKey item = 3;
+}
+
+message UtxoKey {
+  string refTxid = 1;
+  string offset = 2;
+  string amount = 3;
 }

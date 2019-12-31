@@ -51,13 +51,16 @@ func (s *server) PostTx(ctx context.Context, in *pb.TxStatus) (*pb.CommonReply, 
 
 	out, needRepost, err := s.mg.ProcessTx(in)
 	if needRepost {
-		msgInfo, _ := proto.Marshal(in)
-		msg, _ := xuper_p2p.NewXuperMessage(xuper_p2p.XuperMsgVersion1, in.GetBcname(), in.GetHeader().GetLogid(), xuper_p2p.XuperMessage_POSTTX, msgInfo, xuper_p2p.XuperMessage_NONE)
-		opts := []p2pv2.MessageOption{
-			p2pv2.WithFilters([]p2pv2.FilterStrategy{p2pv2.DefaultStrategy}),
-			p2pv2.WithBcName(in.GetBcname()),
-		}
-		go s.mg.P2pv2.SendMessage(context.Background(), msg, opts...)
+		go func() {
+			msgInfo, _ := proto.Marshal(in)
+			msg, _ := xuper_p2p.NewXuperMessage(xuper_p2p.XuperMsgVersion1, in.GetBcname(), in.GetHeader().GetLogid(), xuper_p2p.XuperMessage_POSTTX, msgInfo, xuper_p2p.XuperMessage_NONE)
+			opts := []p2pv2.MessageOption{
+				p2pv2.WithFilters([]p2pv2.FilterStrategy{p2pv2.DefaultStrategy}),
+				p2pv2.WithBcName(in.GetBcname()),
+				p2pv2.WithCompress(s.mg.GetXchainmgConfig().EnableCompress),
+			}
+			s.mg.P2pv2.SendMessage(context.Background(), msg, opts...)
+		}()
 	}
 	return out, err
 }
@@ -94,6 +97,33 @@ func (s *server) BatchPostTx(ctx context.Context, in *pb.BatchTxs) (*pb.CommonRe
 		}
 		go s.mg.P2pv2.SendMessage(context.Background(), msg, opts...)
 	}
+	return out, nil
+}
+
+// QueryUtxoRecord query utxo records
+func (s *server) QueryUtxoRecord(ctx context.Context, in *pb.UtxoRecordDetail) (*pb.UtxoRecordDetail, error) {
+	s.mg.Speed.Add("QueryUtxoRecord")
+	if in.GetHeader() == nil {
+		in.Header = global.GHeader()
+	}
+	out := &pb.UtxoRecordDetail{Header: &pb.Header{}}
+	bc := s.mg.Get(in.GetBcname())
+
+	if bc == nil {
+		out.Header.Error = pb.XChainErrorEnum_CONNECT_REFUSE
+		s.log.Trace("refuse a connection at function call QueryUtxoRecord", "logid", in.Header.Logid)
+		return out, nil
+	}
+
+	accountName := in.GetAccountName()
+	if len(accountName) > 0 {
+		utxoRecord, err := bc.QueryUtxoRecord(accountName, in.GetDisplayCount())
+		if err != nil {
+			return out, err
+		}
+		return utxoRecord, nil
+	}
+
 	return out, nil
 }
 
@@ -372,7 +402,45 @@ func (s *server) GetNetURL(ctx context.Context, in *pb.CommonIn) (*pb.RawUrl, er
 	return out, nil
 }
 
-// SelectUTXO select utxo inputs
+// SelectUTXOBySize select utxo inputs depending on size
+func (s *server) SelectUTXOBySize(ctx context.Context, in *pb.UtxoInput) (*pb.UtxoOutput, error) {
+	if in.GetHeader() == nil {
+		in.Header = global.GHeader()
+	}
+	out := &pb.UtxoOutput{Header: &pb.Header{Logid: in.Header.Logid}}
+	bc := s.mg.Get(in.GetBcname())
+	if bc == nil {
+		out.Header.Error = pb.XChainErrorEnum_CONNECT_REFUSE
+		s.log.Warn("failed to merge utxo, bcname not exists", "logid", in.Header.Logid)
+		return out, nil
+	}
+	out.Header.Error = pb.XChainErrorEnum_SUCCESS
+	utxos, _, totalSelected, err := bc.Utxovm.SelectUtxosBySize(in.GetAddress(), in.GetPublickey(), in.GetNeedLock(), false)
+	if err != nil {
+		out.Header.Error = xchaincore.HandlerUtxoError(err)
+		s.log.Warn("failed to select utxo", "logid", in.Header.Logid, "error", err.Error())
+		return out, nil
+	}
+	utxoList := []*pb.Utxo{}
+	for _, v := range utxos {
+		utxo := &pb.Utxo{
+			RefTxid:   v.RefTxid,
+			RefOffset: v.RefOffset,
+			ToAddr:    v.FromAddr,
+			Amount:    v.Amount,
+		}
+		utxoList = append(utxoList, utxo)
+		s.log.Trace("Merge utxo list", "refTxid", fmt.Sprintf("%x", v.RefTxid), "refOffset", v.RefOffset, "amount", new(big.Int).SetBytes(v.Amount).String())
+	}
+	totalSelectedStr := totalSelected.String()
+	s.log.Trace("Merge utxo totalSelect", "totalSelect", totalSelectedStr)
+	out.UtxoList = utxoList
+	out.TotalSelected = totalSelectedStr
+
+	return out, nil
+}
+
+// SelectUTXO select utxo inputs depending on amount
 func (s *server) SelectUTXO(ctx context.Context, in *pb.UtxoInput) (*pb.UtxoOutput, error) {
 	if in.Header == nil {
 		in.Header = global.GHeader()
@@ -749,7 +817,7 @@ func (s *server) PreExecWithSelectUTXO(ctx context.Context, request *pb.PreExecW
 			UserSign:  request.GetSignInfo().GetSign(),
 			NeedLock:  request.GetNeedLock(),
 		}
-		if ok := validUtxoAccess(utxoInput, s.mg.Get(utxoInput.GetBcname())); !ok {
+		if ok := validUtxoAccess(utxoInput, s.mg.Get(utxoInput.GetBcname()), request.GetTotalAmount()); !ok {
 			return nil, errors.New("validUtxoAccess failed")
 		}
 		utxoOutput, selectErr := s.SelectUTXO(ctx, utxoInput)

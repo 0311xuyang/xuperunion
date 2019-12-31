@@ -10,7 +10,7 @@ cd `dirname $0`
 # go install github.com/golang/protobuf/protoc-gen-go
 # go install github.com/grpc-ecosystem/grpc-gateway/protoc-gen-grpc-gateway
 
-protoc -I pb pb/xchain.proto pb/xchain_spv.proto pb/xcheck.proto pb/chainedbft.proto pb/xendorser.proto \
+protoc -I pb pb/xchain.proto pb/xchain_spv.proto pb/xcheck.proto pb/chainedbft.proto pb/xendorser.proto pb/event.proto\
 	-I pb/googleapis \
 	--go_out=plugins=grpc:pb \
 	--grpc-gateway_out=logtostderr=true:pb 
@@ -55,8 +55,8 @@ mkdir -p plugins/kv plugins/crypto plugins/consensus plugins/contract
 go build --buildmode=plugin --tags multi -o plugins/kv/kv-ldb-multi.so.1.0.0 github.com/xuperchain/xuperunion/kv/kvdb/plugin-ldb
 go build --buildmode=plugin --tags single -o plugins/kv/kv-ldb-single.so.1.0.0 github.com/xuperchain/xuperunion/kv/kvdb/plugin-ldb
 go build --buildmode=plugin -o plugins/kv/kv-badger.so.1.0.0 github.com/xuperchain/xuperunion/kv/kvdb/plugin-badger
-go build --buildmode=plugin -o plugins/crypto/crypto-default.so.1.0.0 github.com/xuperchain/xuperunion/crypto/client/xchain
-go build --buildmode=plugin -o plugins/crypto/crypto-schnorr.so.1.0.0 github.com/xuperchain/xuperunion/crypto/client/schnorr
+go build --buildmode=plugin -o plugins/crypto/crypto-default.so.1.0.0 github.com/xuperchain/xuperunion/crypto/client/xchain/plugin_impl
+go build --buildmode=plugin -o plugins/crypto/crypto-schnorr.so.1.0.0 github.com/xuperchain/xuperunion/crypto/client/schnorr/plugin_impl
 go build --buildmode=plugin -o plugins/consensus/consensus-pow.so.1.0.0 github.com/xuperchain/xuperunion/consensus/pow
 go build --buildmode=plugin -o plugins/consensus/consensus-single.so.1.0.0 github.com/xuperchain/xuperunion/consensus/single
 go build --buildmode=plugin -o plugins/consensus/consensus-tdpos.so.1.0.0 github.com/xuperchain/xuperunion/consensus/tdpos/main

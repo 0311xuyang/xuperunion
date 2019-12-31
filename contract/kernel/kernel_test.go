@@ -98,10 +98,8 @@ func TestCreateBlockChain(t *testing.T) {
 	kl.Init(workspace, kLogger, nil, "xuper")
 	kl.SetNewChainWhiteList(map[string]bool{BobAddress: true})
 	kl.SetMinNewChainAmount("0")
-	utxovm, _ := utxo.MakeUtxoVM("xuper", ledger, workspace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
-	utxovm.RegisterVM("kernel", kl, global.VMPrivRing0)
 	//创建链的时候分配财富
-	tx, err := utxovm.GenerateRootTx([]byte(`
+	tx, err := utxo.GenerateRootTx([]byte(`
        {
         "version" : "1"
         , "consensus" : {
@@ -132,6 +130,8 @@ func TestCreateBlockChain(t *testing.T) {
 	if !confirmStatus.Succ {
 		t.Fatal("confirm block fail")
 	}
+	utxovm, _ := utxo.MakeUtxoVM("xuper", ledger, workspace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
+	utxovm.RegisterVM("kernel", kl, global.VMPrivRing0)
 	err = utxovm.Play(block.Blockid)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestCreateBlockChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	//强行walk到根节点，触发createblockchain的回滚测试
-	err = utxovm.Walk(ledger.GetMeta().RootBlockid)
+	err = utxovm.Walk(ledger.GetMeta().RootBlockid, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,10 +191,8 @@ func TestCreateBlockChainPermission(t *testing.T) {
 	kLogger.SetHandler(log.StreamHandler(os.Stderr, log.LogfmtFormat()))
 	kl.Init(workspace, kLogger, nil, chainName)
 	kl.SetNewChainWhiteList(map[string]bool{BobAddress: true})
-	utxovm, _ := utxo.MakeUtxoVM(chainName, ledger, workspace+chainName, "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
-	utxovm.RegisterVM("kernel", kl, global.VMPrivRing0)
 	//创建链的时候分配财富
-	tx, err := utxovm.GenerateRootTx([]byte(`
+	tx, err := utxo.GenerateRootTx([]byte(`
        {
         "version" : "1"
         , "consensus" : {
@@ -225,6 +223,8 @@ func TestCreateBlockChainPermission(t *testing.T) {
 	if !confirmStatus.Succ {
 		t.Fatal("confirm block fail")
 	}
+	utxovm, _ := utxo.MakeUtxoVM(chainName, ledger, workspace+chainName, "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
+	utxovm.RegisterVM("kernel", kl, global.VMPrivRing0)
 	err = utxovm.Play(block.Blockid)
 	if err != nil {
 		t.Fatal(err)
@@ -285,8 +285,7 @@ func TestRunUpdateMaxBlockSize(t *testing.T) {
 	if err != nil {
 		t.Error("new ledger error ", err.Error())
 	}
-	utxovm, _ := utxo.MakeUtxoVM("xuper", L, workspace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
-	tx, generateRootErr := utxovm.GenerateRootTx([]byte(`
+	tx, generateRootErr := utxo.GenerateRootTx([]byte(`
     {
         "version" : "1"
         , "consensus" : {
@@ -316,14 +315,17 @@ func TestRunUpdateMaxBlockSize(t *testing.T) {
 	if !confirmStatus.Succ {
 		t.Error("confirm block fail")
 	}
+	utxovm, _ := utxo.MakeUtxoVM("xuper", L, workspace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
 	playErr := utxovm.Play(block.Blockid)
 	if playErr != nil {
 		t.Error(playErr)
 	}
-	t.Log("L.GetMaxBlockSize:", L.GetMaxBlockSize())
+	maxSize := utxovm.GetMaxBlockSize()
+	t.Log("UtxoVM.GetMaxBlockSize:", maxSize)
 	context := &contract.TxContext{
 		LedgerObj: L,
 		UtxoBatch: L.GetBaseDB().NewBatch(),
+		UtxoMeta:  utxovm,
 	}
 	kl := &Kernel{}
 	kLogger := log.New("module", "kernel")
@@ -353,8 +355,7 @@ func TestRunUpdateReservedContracts(t *testing.T) {
 	if err != nil {
 		t.Error("new ledger error ", err.Error())
 	}
-	utxovm, _ := utxo.MakeUtxoVM("xuper", L, workspace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
-	tx, generateRootErr := utxovm.GenerateRootTx([]byte(`
+	tx, generateRootErr := utxo.GenerateRootTx([]byte(`
     {
         "version" : "1"
         , "consensus" : {
@@ -394,6 +395,7 @@ func TestRunUpdateReservedContracts(t *testing.T) {
 	if !confirmStatus.Succ {
 		t.Error("confirm block fail")
 	}
+	utxovm, _ := utxo.MakeUtxoVM("xuper", L, workspace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
 	playErr := utxovm.Play(block.Blockid)
 	if playErr != nil {
 		t.Error(playErr)
@@ -403,7 +405,8 @@ func TestRunUpdateReservedContracts(t *testing.T) {
 	if err != nil {
 		t.Error("originalReservedContracts ", originalReservedContracts)
 	}
-	MetaReservedContracts := L.GetMeta().ReservedContracts
+	//MetaReservedContracts := L.GetMeta().ReservedContracts
+	MetaReservedContracts := utxovm.GetReservedContracts()
 	t.Log("MetaReservedContracts: ", MetaReservedContracts)
 	if MetaReservedContracts != nil {
 		reservedContracts = MetaReservedContracts
@@ -414,6 +417,7 @@ func TestRunUpdateReservedContracts(t *testing.T) {
 	context := &contract.TxContext{
 		LedgerObj: L,
 		UtxoBatch: L.GetBaseDB().NewBatch(),
+		UtxoMeta:  utxovm,
 	}
 	kl := &Kernel{}
 	kLogger := log.New("module", "kernel")
@@ -433,7 +437,7 @@ func TestRunUpdateReservedContracts(t *testing.T) {
                         }
                     }
                 ],
-                "reserved_contracts":[
+                "new_reserved_contracts":[
                 {
                     "module_name":"wasm",
                     "contract_name":"identity",
@@ -469,8 +473,7 @@ func TestRunUpdateForbiddenContract(t *testing.T) {
 		t.Error("new ledger error", ledgerErr.Error())
 	}
 
-	utxovm, _ := utxo.MakeUtxoVM("xuper", L, workSpace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
-	tx, generateRootErr := utxovm.GenerateRootTx([]byte(`
+	tx, generateRootErr := utxo.GenerateRootTx([]byte(`
 	{
 		"version" : "1"
 		, "consensus" : {
@@ -507,6 +510,7 @@ func TestRunUpdateForbiddenContract(t *testing.T) {
 	if !confirmStatus.Succ {
 		t.Error("confirm block fail")
 	}
+	utxovm, _ := utxo.MakeUtxoVM("xuper", L, workSpace+"xuper", "", "", []byte(""), nil, 5000, 60, 500, nil, false, defaultKVEngine, crypto_client.CryptoTypeDefault)
 	playErr := utxovm.Play(block.Blockid)
 	if playErr != nil {
 		t.Error(playErr)
@@ -516,7 +520,8 @@ func TestRunUpdateForbiddenContract(t *testing.T) {
 	if err != nil {
 		t.Error("get originalForbiddenContract error->", err)
 	}
-	MetaForbiddenContract := L.GetMeta().ForbiddenContract
+	//MetaForbiddenContract := L.GetMeta().ForbiddenContract
+	MetaForbiddenContract := utxovm.GetForbiddenContract()
 	t.Log("MetaForbiddenContract:", MetaForbiddenContract)
 	if MetaForbiddenContract != nil {
 		forbiddenContract = MetaForbiddenContract
@@ -527,6 +532,7 @@ func TestRunUpdateForbiddenContract(t *testing.T) {
 	context := &contract.TxContext{
 		LedgerObj: L,
 		UtxoBatch: L.GetBaseDB().NewBatch(),
+		UtxoMeta:  utxovm,
 	}
 	kl := &Kernel{}
 	kLogger := log.New("module", "kernel")
@@ -542,7 +548,7 @@ func TestRunUpdateForbiddenContract(t *testing.T) {
 				"method_name": "get",
 				"args":{}
 			},
-			"forbidden_contract": {
+			"new_forbidden_contract": {
 				"module_name": "wasm",
 				"contract_name": "forbidden",
 				"method_name": "get1",
@@ -557,7 +563,6 @@ func TestRunUpdateForbiddenContract(t *testing.T) {
 	if runUpdateBlkChainErr != nil {
 		t.Error("runUpdateForbiddenContract error:->", runUpdateBlkChainErr.Error())
 	}
-
 	rollbackUpdateBlkChainErr := kl.rollbackUpdateForbiddenContract(txDesc)
 	if rollbackUpdateBlkChainErr != nil {
 		t.Error("runUpdateForbiddenContract error:->", rollbackUpdateBlkChainErr.Error())
@@ -572,24 +577,27 @@ func TestRunUpdateForbiddenContract(t *testing.T) {
 	}
 	`)
 	json.Unmarshal(args2, txDesc)
-	t.Log("original newAccountResourceAmount->", L.GetMeta().NewAccountResourceAmount)
-	if L.GetMeta().NewAccountResourceAmount != 1000 {
-		t.Error("expect 1000, but got ", L.GetMeta().NewAccountResourceAmount)
+	originalNewAccountResourceAmount := utxovm.GetNewAccountResourceAmount()
+	t.Log("original newAccountResourceAmount->", originalNewAccountResourceAmount)
+	if originalNewAccountResourceAmount != 1000 {
+		t.Error("expect 1000, but got ", originalNewAccountResourceAmount)
 	}
 	runUpadteNewAccountResourceAmountErr := kl.runUpdateNewAccountResourceAmount(txDesc)
 	if runUpadteNewAccountResourceAmountErr != nil {
 		t.Error("runUpadteNewAccountResourceAmount error:->", runUpadteNewAccountResourceAmountErr.Error())
 	}
-	t.Log("new newAccountResourceAmount->", L.GetMeta().NewAccountResourceAmount)
-	if L.GetMeta().NewAccountResourceAmount != 100 {
-		t.Error("expect 100, but got ", L.GetMeta().NewAccountResourceAmount)
+	currentNewAccountResourceAmount := utxovm.GetNewAccountResourceAmount()
+	t.Log("new newAccountResourceAmount->", currentNewAccountResourceAmount)
+	if currentNewAccountResourceAmount != 1000 {
+		t.Error("expect 1000, but got ", currentNewAccountResourceAmount)
 	}
 	rollbackUpdateNewAccountResourceAmountErr := kl.rollbackUpdateNewAccountResourceAmount(txDesc)
 	if rollbackUpdateNewAccountResourceAmountErr != nil {
 		t.Error("rollbackUpdateNewAccountResourceAmount error:->", rollbackUpdateNewAccountResourceAmountErr.Error())
 	}
-	t.Log("rollback newAccountResourceAmount->", L.GetMeta().NewAccountResourceAmount)
-	if L.GetMeta().NewAccountResourceAmount != 1000 {
-		t.Error("expect 1000, but got ", L.GetMeta().NewAccountResourceAmount)
+	rollbackNewAccountResourceAmount := utxovm.GetNewAccountResourceAmount()
+	t.Log("rollback newAccountResourceAmount->", rollbackNewAccountResourceAmount)
+	if rollbackNewAccountResourceAmount != 1000 {
+		t.Error("expect 1000, but got ", rollbackNewAccountResourceAmount)
 	}
 }

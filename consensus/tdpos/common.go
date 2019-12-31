@@ -130,6 +130,7 @@ func (tp *TDpos) getTermProposer(term int64) []*cons_base.CandidateInfo {
 		return nil
 	} else if common.NormalizedKVError(err) == common.ErrKVNotFound {
 		it := tp.utxoVM.ScanWithPrefix([]byte(genTermCheckKeyPrefix(tp.version)))
+		defer it.Release()
 		if it.Last() {
 			termLast, err := parseTermCheckKey(string(it.Key()))
 			tp.log.Trace("TDpos getTermProposer ", "termLast", string(it.Key()))
@@ -275,6 +276,9 @@ func (tp *TDpos) validateVote(desc *contract.TxDesc) (*voteInfo, error) {
 	if int64(len(voteInfo.candidates)) > tp.config.proposerNum {
 		return nil, errors.New("candidates nums should less than proposer nums")
 	}
+	if len(desc.Tx.TxInputs) <= 0 {
+		return nil, errors.New("when voting, TxInput should not be nil")
+	}
 	voteInfo.voter = string(desc.Tx.TxInputs[0].FromAddr)
 	tp.log.Trace("validateVote success", "voteInfo", voteInfo)
 	return voteInfo, nil
@@ -347,6 +351,9 @@ func (tp *TDpos) validateNominateCandidate(desc *contract.TxDesc) (*cons_base.Ca
 		return nil, "", err
 	}
 	// TODO: zq 多来源以后, 这里需要优化一下
+	if len(desc.Tx.TxInputs) <= 0 {
+		return nil, "", errors.New("validateNominateCandidate TxInput should not be nil")
+	}
 	fromAddr := string(desc.Tx.TxInputs[0].FromAddr)
 	canInfo := &cons_base.CandidateInfo{}
 
@@ -407,6 +414,9 @@ func (tp *TDpos) validateRevokeCandidate(desc *contract.TxDesc) (string, string,
 	candidate, ok := descNom.Args["candidate"].(string)
 	if !ok {
 		return "", "", "", errors.New("candidates should be string")
+	}
+	if len(descNom.Tx.TxInputs) <= 0 {
+		return "", "", "", errors.New("when validateRevokeCandidate, TxInputs should not be nil")
 	}
 	fromAddr := string(descNom.Tx.TxInputs[0].FromAddr)
 	return candidate, fromAddr, hex.EncodeToString(descNom.Tx.Txid), nil

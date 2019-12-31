@@ -41,6 +41,12 @@ func ToPBContractResponse(resp *Response) *pb.ContractResponse {
 	}
 }
 
+// ChainCore is the interface of chain service
+type ChainCore interface {
+	GetAccountAddresses(accountName string) ([]string, error)
+	VerifyContractPermission(initiator string, authRequire []string, contractName, methodName string) (bool, error)
+}
+
 // ContextConfig define the config of context
 type ContextConfig struct {
 	XMCache     *xmodel.XMCache
@@ -52,6 +58,19 @@ type ContextConfig struct {
 	ResourceLimits           Limits
 	// Whether contract can be initialized
 	CanInitialize bool
+
+	// The chain service
+	Core ChainCore
+
+	// The amount transfer to contract
+	TransferAmount string
+
+	// Chain name
+	BCName string
+
+	// Contract being called
+	// set by bridge to check recursive contract call
+	ContractSet map[string]bool
 }
 
 // VirtualMachine define virtual machine interface

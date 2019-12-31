@@ -64,6 +64,14 @@ type InvokeRequest struct {
 	ResouceLimits []ResourceLimit   `json:"resource_limits"`
 }
 
+// GasPrice proto.GasPrice
+type GasPrice struct {
+	CpuRate  int64 `json:"cpu_rate"`
+	MemRate  int64 `json:"mem_rate"`
+	DiskRate int64 `json:"disk_rate"`
+	XfeeRate int64 `json:"xfee_rate"`
+}
+
 // SignatureInfo proto.SignatureInfo
 type SignatureInfo struct {
 	PublicKey string `json:"publickey"`
@@ -101,7 +109,7 @@ type QCSignInfos struct {
 // QuorumCert is a data type that combines a collection of signatures from replicas.
 type QuorumCert struct {
 	// The id of Proposal this QC certified.
-	ProposalId []byte `protobuf:"bytes,1,opt,name=ProposalId,proto3" json:"ProposalId,omitempty"`
+	ProposalId string `protobuf:"bytes,1,opt,name=ProposalId,proto3" json:"ProposalId,omitempty"`
 	// The msg of Proposal this QC certified.
 	ProposalMsg []byte `protobuf:"bytes,2,opt,name=ProposalMsg,proto3" json:"ProposalMsg,omitempty"`
 	// The current type of this QC certified.
@@ -133,7 +141,14 @@ type Transaction struct {
 	AuthRequire       []string         `json:"authRequire"`
 	InitiatorSigns    []SignatureInfo  `json:"initiatorSigns"`
 	AuthRequireSigns  []SignatureInfo  `json:"authRequireSigns"`
-	ReceivedTimestamp int64            `json:"receivedTimestamp:"`
+	ReceivedTimestamp int64            `json:"receivedTimestamp"`
+	ModifyBlock       ModifyBlock      `json:"modifyBlock"`
+}
+
+type ModifyBlock struct {
+	Marked          bool   `json:"marked"`
+	EffectiveHeight int64  `json:"effectiveHeight"`
+	EffectiveTxid   string `json:"effectiveTxid"`
 }
 
 // BigInt big int
@@ -234,6 +249,13 @@ func FromPBTx(tx *pb.Transaction) *Transaction {
 		})
 	}
 
+	if tx.ModifyBlock != nil {
+		t.ModifyBlock = ModifyBlock{
+			EffectiveHeight: tx.ModifyBlock.EffectiveHeight,
+			Marked:          tx.ModifyBlock.Marked,
+			EffectiveTxid:   tx.ModifyBlock.EffectiveTxid,
+		}
+	}
 	return t
 }
 
@@ -294,7 +316,7 @@ func FromInternalBlockPB(block *pb.InternalBlock) *InternalBlock {
 func FromPBJustify(qc *pb.QuorumCert) *QuorumCert {
 	justify := &QuorumCert{}
 	if qc != nil {
-		justify.ProposalId = qc.ProposalId
+		justify.ProposalId = hex.EncodeToString(qc.ProposalId)
 		justify.ProposalMsg = qc.ProposalMsg
 		justify.Type = QCState(int(qc.Type))
 		justify.ViewNumber = qc.ViewNumber
@@ -321,14 +343,6 @@ type LedgerMeta struct {
 	TipBlockid HexID `json:"tipBlockid"`
 	// TrunkHeight TrunkHeight
 	TrunkHeight int64 `json:"trunkHeight"`
-	// MaxBlockSize MaxBlockSize
-	MaxBlockSize int64 `json:"maxBlockSize"`
-	// ReservedContracts ReservedContracts
-	ReservedContracts []InvokeRequest `json:"reservedContracts"`
-	// ForbiddenContract forbidden contract
-	ForbiddenContract InvokeRequest `json:"forbiddenContract"`
-	// NewAccountResourceAmount resource amount of creating an account
-	NewAccountResourceAmount int64 `json:"newAccountResourceAmount"`
 }
 
 // UtxoMeta proto.UtxoMeta
@@ -343,6 +357,20 @@ type UtxoMeta struct {
 	AvgDelay int64 `json:"avgDelay"`
 	// Current unconfirmed tx amount
 	UnconfirmTxAmount int64 `json:"unconfirmed"`
+	// MaxBlockSize MaxBlockSize
+	MaxBlockSize int64 `json:"maxBlockSize"`
+	// ReservedContracts ReservedContracts
+	ReservedContracts []InvokeRequest `json:"reservedContracts"`
+	// ForbiddenContract forbidden contract
+	ForbiddenContract InvokeRequest `json:"forbiddenContract"`
+	// NewAccountResourceAmount resource amount of creating an account
+	NewAccountResourceAmount int64 `json:"newAccountResourceAmount"`
+	// IrreversibleBlockHeight irreversible block height
+	IrreversibleBlockHeight int64 `json:"irreversibleBlockHeight"`
+	// IrreversibleSlideWindow irreversible slide window
+	IrreversibleSlideWindow int64 `json:"irreversibleSlideWindow"`
+	// GasPrice gas rate to utxo for different type resources
+	GasPrice GasPrice `json:"gasPrice"`
 }
 
 // ChainStatus proto.ChainStatus
@@ -350,6 +378,8 @@ type ChainStatus struct {
 	Name       string     `json:"name"`
 	LedgerMeta LedgerMeta `json:"ledger"`
 	UtxoMeta   UtxoMeta   `json:"utxo"`
+	// add BranchBlockid
+	BranchBlockid []string `json:"branchBlockid"`
 }
 
 // SystemStatus proto.SystemStatus
@@ -365,7 +395,7 @@ func FromSystemStatusPB(statuspb *pb.SystemsStatus) *SystemStatus {
 	for _, chain := range statuspb.GetBcsStatus() {
 		ledgerMeta := chain.GetMeta()
 		utxoMeta := chain.GetUtxoMeta()
-		ReservedContracts := ledgerMeta.GetReservedContracts()
+		ReservedContracts := utxoMeta.GetReservedContracts()
 		rcs := []InvokeRequest{}
 		for _, rcpb := range ReservedContracts {
 			args := map[string]string{}
@@ -380,8 +410,7 @@ func FromSystemStatusPB(statuspb *pb.SystemsStatus) *SystemStatus {
 			}
 			rcs = append(rcs, rc)
 		}
-
-		forbiddenContract := ledgerMeta.GetForbiddenContract()
+		forbiddenContract := utxoMeta.GetForbiddenContract()
 		args := forbiddenContract.GetArgs()
 		originalArgs := map[string]string{}
 		for key, value := range args {
@@ -393,25 +422,37 @@ func FromSystemStatusPB(statuspb *pb.SystemsStatus) *SystemStatus {
 			MethodName:   forbiddenContract.GetMethodName(),
 			Args:         originalArgs,
 		}
-
+		gasPricePB := utxoMeta.GetGasPrice()
+		gasPrice := GasPrice{
+			CpuRate:  gasPricePB.GetCpuRate(),
+			MemRate:  gasPricePB.GetMemRate(),
+			DiskRate: gasPricePB.GetDiskRate(),
+			XfeeRate: gasPricePB.GetXfeeRate(),
+		}
 		status.ChainStatus = append(status.ChainStatus, ChainStatus{
 			Name: chain.GetBcname(),
 			LedgerMeta: LedgerMeta{
-				RootBlockid:              ledgerMeta.GetRootBlockid(),
-				TipBlockid:               ledgerMeta.GetTipBlockid(),
-				TrunkHeight:              ledgerMeta.GetTrunkHeight(),
-				MaxBlockSize:             ledgerMeta.GetMaxBlockSize(),
-				NewAccountResourceAmount: ledgerMeta.GetNewAccountResourceAmount(),
-				ReservedContracts:        rcs,
-				ForbiddenContract:        forbiddenContractMap,
+				RootBlockid: ledgerMeta.GetRootBlockid(),
+				TipBlockid:  ledgerMeta.GetTipBlockid(),
+				TrunkHeight: ledgerMeta.GetTrunkHeight(),
 			},
 			UtxoMeta: UtxoMeta{
-				LatestBlockid:     utxoMeta.GetLatestBlockid(),
-				LockKeyList:       utxoMeta.GetLockKeyList(),
-				UtxoTotal:         utxoMeta.GetUtxoTotal(),
-				AvgDelay:          utxoMeta.GetAvgDelay(),
-				UnconfirmTxAmount: utxoMeta.GetUnconfirmTxAmount(),
+				LatestBlockid:            utxoMeta.GetLatestBlockid(),
+				LockKeyList:              utxoMeta.GetLockKeyList(),
+				UtxoTotal:                utxoMeta.GetUtxoTotal(),
+				AvgDelay:                 utxoMeta.GetAvgDelay(),
+				UnconfirmTxAmount:        utxoMeta.GetUnconfirmTxAmount(),
+				MaxBlockSize:             utxoMeta.GetMaxBlockSize(),
+				NewAccountResourceAmount: utxoMeta.GetNewAccountResourceAmount(),
+				ReservedContracts:        rcs,
+				ForbiddenContract:        forbiddenContractMap,
+				// Irreversible block height & slide window
+				IrreversibleBlockHeight: utxoMeta.GetIrreversibleBlockHeight(),
+				IrreversibleSlideWindow: utxoMeta.GetIrreversibleSlideWindow(),
+				// add GasPrice value
+				GasPrice: gasPrice,
 			},
+			BranchBlockid: chain.GetBranchBlockid(),
 		})
 	}
 	status.Peers = statuspb.GetPeerUrls()

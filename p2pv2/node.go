@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
 	//"path/filepath"
 	"strings"
 
@@ -14,12 +15,12 @@ import (
 	circuit "github.com/libp2p/go-libp2p-circuit"
 	crypto "github.com/libp2p/go-libp2p-crypto"
 	host "github.com/libp2p/go-libp2p-host"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	net "github.com/libp2p/go-libp2p-net"
 	peer "github.com/libp2p/go-libp2p-peer"
 	pstore "github.com/libp2p/go-libp2p-peerstore"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/pkg/errors"
-	dht "github.com/xuperchain/go-libp2p-kad-dht"
 	log "github.com/xuperchain/log15"
 
 	"github.com/xuperchain/xuperunion/common/config"
@@ -67,18 +68,19 @@ type corePeersRoute struct {
 
 // Node is the node in the network
 type Node struct {
-	id        peer.ID
-	privKey   crypto.PrivKey
-	log       log.Logger
-	host      host.Host
-	kdht      *dht.IpfsDHT
-	strPool   *StreamPool
-	ctx       context.Context
-	srv       *P2PServerV2
-	quitCh    chan bool
-	addrs     map[string]*XchainAddrInfo
-	coreRoute map[string]*corePeersRoute
-	routeLock sync.RWMutex
+	id          peer.ID
+	privKey     crypto.PrivKey
+	log         log.Logger
+	host        host.Host
+	kdht        *dht.IpfsDHT
+	strPool     *StreamPool
+	ctx         context.Context
+	srv         *P2PServerV2
+	quitCh      chan bool
+	addrs       map[string]*XchainAddrInfo
+	coreRoute   map[string]*corePeersRoute
+	staticNodes map[string][]peer.ID
+	routeLock   sync.RWMutex
 	// StreamLimit
 	streamLimit *StreamLimit
 	// ldb persist peers info and get peers info
@@ -128,7 +130,6 @@ func NewNode(cfg config.P2PConfig, log log.Logger) (*Node, error) {
 
 	// initialize StreamLimit, set limit size
 	no.streamLimit.Init(cfg.StreamIPLimitSize, log)
-	ho.SetStreamHandler(XuperProtocolID, no.handlerNewStream)
 
 	if no.kdht, err = dht.New(ctx, ho); err != nil {
 		return nil, ErrCreateKadDht
@@ -156,11 +157,35 @@ func NewNode(cfg config.P2PConfig, log log.Logger) (*Node, error) {
 	if len(cfg.BootNodes) > 0 {
 		peers = append(peers, cfg.BootNodes...)
 	}
+	for _, ps := range cfg.StaticNodes {
+		peers = append(peers, ps...)
+	}
+
 	succNum := no.ConnectToPeersByAddr(peers)
 	if succNum == 0 && len(cfg.BootNodes) != 0 {
 		return nil, ErrConnectBootStrap
 	}
+
+	// setup static nodes
+	setStaticNodes(cfg, no)
 	return no, nil
+}
+
+func setStaticNodes(cfg config.P2PConfig, node *Node) error {
+	staticNodes := map[string][]peer.ID{}
+	for bcname, peers := range cfg.StaticNodes {
+		ps := []peer.ID{}
+		for _, peer := range peers {
+			id, err := GetIDFromAddr(peer)
+			if err != nil {
+				continue
+			}
+			ps = append(ps, id)
+		}
+		staticNodes[bcname] = ps
+	}
+	node.staticNodes = staticNodes
+	return nil
 }
 
 func genHostOption(cfg config.P2PConfig) ([]libp2p.Option, error) {
@@ -187,6 +212,7 @@ func genHostOption(cfg config.P2PConfig) ([]libp2p.Option, error) {
 // Start start the node
 func (no *Node) Start() {
 	no.log.Trace("Start node")
+	no.host.SetStreamHandler(XuperProtocolID, no.handlerNewStream)
 	t := time.NewTicker(time.Duration(time.Second * 30))
 	defer t.Stop()
 	for {
@@ -412,7 +438,8 @@ func (no *Node) connectToPeers(ppi []*pstore.PeerInfo) int {
 		}
 		// only retry if all connection failed
 		retryCount--
-		time.Sleep(1 * time.Second)
+		num := rand.Int63n(10)
+		time.Sleep(time.Duration(num) * time.Second)
 	}
 	return succNum
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/patrickmn/go-cache"
 	log "github.com/xuperchain/log15"
 
 	"github.com/xuperchain/xuperunion/common"
@@ -74,6 +75,10 @@ const (
 	MaxReposting = 300 // tx重试广播的最大并发，过多容易打爆对方的grpc连接数
 	// RepostingInterval repost retry interval, ms
 	RepostingInterval = 50 // 重试广播间隔ms
+	TxidCacheGcTime   = 180 * time.Second
+
+	// DefaultMessageCacheSize for p2p message
+	DefaultMessageCacheSize = 1000
 )
 
 // XChainCore is the core struct of a chain
@@ -106,6 +111,15 @@ type XChainCore struct {
 	coreConnection bool
 	// if failSkip is false, you will execute loop of walk, or just only once walk
 	failSkip bool
+	// add a lru cache of tx gotten for xchaincore
+	txidCache            *cache.Cache
+	txidCacheExpiredTime time.Duration
+	enableCompress       bool
+	pruneOption          config.PruneOption
+
+	// cache for duplicate block message
+	msgCache           *common.LRUCache
+	blockBroadcaseMode uint8
 }
 
 // Status return the status of the chain
@@ -135,6 +149,12 @@ func (xc *XChainCore) Init(bcname string, xlog log.Logger, cfg *config.NodeConfi
 	xc.stopFlag = false
 	xc.coreConnection = cfg.CoreConnection
 	xc.failSkip = cfg.FailSkip
+	xc.txidCacheExpiredTime = cfg.TxidCacheExpiredTime
+	xc.txidCache = cache.New(xc.txidCacheExpiredTime, TxidCacheGcTime)
+	xc.enableCompress = cfg.EnableCompress
+	xc.pruneOption = cfg.Prune
+	xc.msgCache = common.NewLRUCache(DefaultMessageCacheSize)
+	xc.blockBroadcaseMode = cfg.BlockBroadcaseMode
 	ledger.MemCacheSize = cfg.DBCache.MemCacheSize
 	ledger.FileHandlersCacheSize = cfg.DBCache.FdCacheSize
 	datapath := cfg.Datapath + "/" + bcname
@@ -225,8 +245,12 @@ func (xc *XChainCore) Init(bcname string, xlog log.Logger, cfg *config.NodeConfi
 	}
 	if cfg.Utxo.AsyncMode {
 		xc.Utxovm.StartAsyncWriter()
+	} else if cfg.Utxo.AsyncBlockMode {
+		//
+		xc.Utxovm.StartAsyncBlockMode()
 	}
 	xc.Utxovm.SetMaxConfirmedDelay(cfg.Utxo.MaxConfirmedDelay)
+	xc.Utxovm.SetModifyBlockAddr(cfg.ModifyBlockAddr)
 	gBlk := xc.Ledger.GetGenesisBlock()
 	if gBlk == nil {
 		xc.log.Warn("GenesisBlock nil")
@@ -319,9 +343,17 @@ func (xc *XChainCore) repostOfflineTx() {
 		opts := []p2pv2.MessageOption{
 			p2pv2.WithFilters(filters),
 			p2pv2.WithBcName(xc.bcname),
+			p2pv2.WithCompress(xc.enableCompress),
 		}
 		go xc.P2pv2.SendMessage(context.Background(), msg, opts...) //p2p广播出去
 	}
+}
+
+func (xc *XChainCore) ProcessSendBlock(in *pb.Block, hd *global.XContext) error {
+	if xc.pruneOption.Switch && xc.pruneOption.Bcname == xc.bcname {
+		return errors.New("the chain is dong ledger pruning")
+	}
+	return xc.SendBlock(in, hd)
 }
 
 // SendBlock send block
@@ -331,7 +363,8 @@ func (xc *XChainCore) SendBlock(in *pb.Block, hd *global.XContext) error {
 		return ErrServiceRefused
 	}
 	blockSize := int64(proto.Size(in.Block))
-	if blockSize > xc.Ledger.GetMaxBlockSize() {
+	maxBlockSize := xc.Utxovm.GetMaxBlockSize()
+	if blockSize > maxBlockSize {
 		xc.log.Debug("refused a connection because block is too large", "logid", in.Header.Logid, "cost", hd.Timer.Print(), "size", blockSize)
 		return ErrServiceRefused
 	}
@@ -408,7 +441,8 @@ func (xc *XChainCore) SendBlock(in *pb.Block, hd *global.XContext) error {
 					return ErrCannotSyncBlock
 				}
 				ibSize := int64(proto.Size(ib.Block))
-				if ibSize > xc.Ledger.GetMaxBlockSize() {
+				maxSize := xc.Utxovm.GetMaxBlockSize()
+				if ibSize > maxSize {
 					xc.log.Warn("too large block", "size", ibSize, "blockid", global.F(ib.Block.Blockid))
 					return ErrBlockTooLarge
 				}
@@ -491,7 +525,7 @@ func (xc *XChainCore) SendBlock(in *pb.Block, hd *global.XContext) error {
 			}
 			return nil
 		}
-		err := xc.Utxovm.Walk(block0.Blockid)
+		err := xc.Utxovm.Walk(block0.Blockid, false)
 		xc.log.Debug("Walk Time", "logid", in.Header.Logid, "cost", hd.Timer.Print())
 		if err != nil {
 			xc.log.Warn("Walk error", "logid", in.Header.Logid, "err", err)
@@ -521,7 +555,7 @@ func (xc *XChainCore) doMiner() {
 
 	if !bytes.Equal(ledgerLastID, utxovmLastID) {
 		xc.log.Warn("ledger last blockid is not equal utxovm last id")
-		err := xc.Utxovm.Walk(ledgerLastID)
+		err := xc.Utxovm.Walk(ledgerLastID, false)
 		// if xc.failSkip = false, then keep logic, if not equal, retry
 		if err != nil {
 			if !xc.failSkip {
@@ -573,7 +607,10 @@ func (xc *XChainCore) doMiner() {
 	}
 	meta := xc.Ledger.GetMeta()
 	accumulatedTxSize := 0
-	txSizeTotalLimit := xc.Ledger.MaxTxSizePerBlock()
+	txSizeTotalLimit, txSizeTotalLimitErr := xc.Utxovm.MaxTxSizePerBlock()
+	if txSizeTotalLimitErr != nil {
+		return
+	}
 	var freshBlock *pb.InternalBlock
 	var freshBatch kvdb.Batch
 	txs := []*pb.Transaction{}
@@ -603,7 +640,7 @@ func (xc *XChainCore) doMiner() {
 		txs = append(txs, ucTx)
 	}
 	fakeBlock, err := xc.Ledger.FormatFakeBlock(txs, xc.address, xc.privateKey,
-		t.UnixNano(), curTerm, curBlockNum, xc.Utxovm.GetLatestBlockid(), xc.Utxovm.GetTotal())
+		t.UnixNano(), curTerm, curBlockNum, xc.Utxovm.GetLatestBlockid(), xc.Utxovm.GetTotal(), xc.Ledger.GetMeta().TrunkHeight+1)
 	if err != nil {
 		xc.log.Warn("[Minning] format fake block error", "logid")
 		return
@@ -624,7 +661,7 @@ func (xc *XChainCore) doMiner() {
 	txs = append(txs, awardtx)
 	freshBlock, err = xc.Ledger.FormatMinerBlock(txs, xc.address, xc.privateKey,
 		t.UnixNano(), curTerm, curBlockNum, xc.Utxovm.GetLatestBlockid(), targetBits,
-		xc.Utxovm.GetTotal(), qc, fakeBlock.FailedTxs)
+		xc.Utxovm.GetTotal(), qc, fakeBlock.FailedTxs, xc.Ledger.GetMeta().TrunkHeight+1)
 	if err != nil {
 		xc.log.Warn("[Minning] format block error", "logid", header.Logid, "err", err)
 		return
@@ -658,27 +695,51 @@ func (xc *XChainCore) doMiner() {
 	xc.log.Debug("[Minning] Start to BroadCast", "logid", header.Logid)
 
 	go func() {
-		// broadcast block
+		// 这里提出两种块传播模式：
+		//  1. 一种是完全块广播模式(Full_BroadCast_Mode)，即直接广播原始块给所有相邻节点，
+		//     适用于出块矿工在知道周围节点都不具备该块的情况下；
+		//  2. 一种是问询式块广播模式(Interactive_BroadCast_Mode)，即先广播新块的头部给相邻节点，
+		//     相邻节点在没有相同块的情况下通过GetBlock主动获取块数据。
+		//  3. Mixed_BroadCast_Mode是指出块节点将新块用Full_BroadCast_Mode模式广播，
+		//     其他节点使用Interactive_BroadCast_Mode
+		// broadcast block in Full_BroadCast_Mode since it's the original miner
 		block := &pb.Block{
 			Bcname:  xc.bcname,
 			Blockid: freshBlock.Blockid,
-			Block:   freshBlock,
 		}
-		msgInfo, _ := proto.Marshal(block)
-		msg, _ := xuper_p2p.NewXuperMessage(xuper_p2p.XuperMsgVersion1, xc.bcname, "", xuper_p2p.XuperMessage_SENDBLOCK, msgInfo, xuper_p2p.XuperMessage_NONE)
-		filters := []p2pv2.FilterStrategy{p2pv2.DefaultStrategy}
-		if xc.NeedCoreConnection() {
-			filters = append(filters, p2pv2.CorePeersStrategy)
+		if xc.blockBroadcaseMode == 1 {
+			// send block id in Interactive_BroadCast_Mode
+			msgInfo, _ := proto.Marshal(block)
+			msg, _ := xuper_p2p.NewXuperMessage(xuper_p2p.XuperMsgVersion1, xc.bcname, "", xuper_p2p.XuperMessage_NEW_BLOCKID, msgInfo, xuper_p2p.XuperMessage_NONE)
+			filters := []p2pv2.FilterStrategy{p2pv2.DefaultStrategy}
+			if xc.NeedCoreConnection() {
+				filters = append(filters, p2pv2.CorePeersStrategy)
+			}
+			opts := []p2pv2.MessageOption{
+				p2pv2.WithFilters(filters),
+				p2pv2.WithBcName(xc.bcname),
+			}
+			xc.P2pv2.SendMessage(context.Background(), msg, opts...)
+		} else {
+			// send full block in Full_BroadCast_Mode or Mixed_Broadcast_Mode
+			block.Block = freshBlock
+			msgInfo, _ := proto.Marshal(block)
+			msg, _ := xuper_p2p.NewXuperMessage(xuper_p2p.XuperMsgVersion1, xc.bcname, "", xuper_p2p.XuperMessage_SENDBLOCK, msgInfo, xuper_p2p.XuperMessage_NONE)
+			filters := []p2pv2.FilterStrategy{p2pv2.DefaultStrategy}
+			if xc.NeedCoreConnection() {
+				filters = append(filters, p2pv2.CorePeersStrategy)
+			}
+			opts := []p2pv2.MessageOption{
+				p2pv2.WithFilters(filters),
+				p2pv2.WithBcName(xc.bcname),
+				p2pv2.WithCompress(xc.enableCompress),
+			}
+			xc.P2pv2.SendMessage(context.Background(), msg, opts...)
 		}
-		opts := []p2pv2.MessageOption{
-			p2pv2.WithFilters(filters),
-			p2pv2.WithBcName(xc.bcname),
-		}
-		xc.P2pv2.SendMessage(context.Background(), msg, opts...)
 	}()
 
 	minerTimer.Mark("BroadcastBlock")
-	if xc.Utxovm.IsAsync() {
+	if xc.Utxovm.IsAsync() || xc.Utxovm.IsAsyncBlock() {
 		xc.log.Warn("doMiner cost", "cost", minerTimer.Print(), "txCount", freshBlock.TxCount)
 	} else {
 		xc.log.Debug("doMiner cost", "cost", minerTimer.Print(), "txCount", freshBlock.TxCount)
@@ -692,7 +753,7 @@ func (xc *XChainCore) Miner() int {
 	utxovmLastID := xc.Utxovm.GetLatestBlockid()
 	if !bytes.Equal(ledgerLastID, utxovmLastID) {
 		xc.log.Warn("ledger last blockid is not equal utxovm last id")
-		xc.Utxovm.Walk(ledgerLastID)
+		xc.Utxovm.Walk(ledgerLastID, false)
 	}
 	// 2 FAST_SYNC模式下需要回滚掉本地所有的未确认交易
 	if xc.nodeMode == config.NodeModeFastSync {
@@ -707,6 +768,23 @@ func (xc *XChainCore) Miner() int {
 	for {
 		// 重要: 首次出块前一定要同步到最新的状态
 		xc.log.Trace("Miner type of consensus", "type", xc.con.Type(xc.Ledger.GetMeta().TrunkHeight+1))
+		// 账本裁剪入口
+		if xc.pruneOption.Switch && xc.pruneOption.Bcname == xc.bcname {
+			rawBlockid, err := hex.DecodeString(xc.pruneOption.TargetBlockid)
+			if err != nil {
+				return -1
+			}
+			err = xc.pruneLedger(rawBlockid)
+			if err != nil {
+				xc.log.Warn("pruning ledger failed", "err", err)
+				return -1
+			}
+			xc.log.Trace("pruning ledger success")
+			xc.pruneOption.Switch = false
+			xc.SyncBlocks()
+			// 裁剪账本可能需要时间，做完之后直接返回
+			continue
+		}
 		b, s := xc.con.CompeteMaster(xc.Ledger.GetMeta().TrunkHeight + 1)
 		xc.log.Debug("competemaster", "blockchain", xc.bcname, "master", b, "needSync", s)
 		xc.updateIsCoreMiner()
@@ -775,7 +853,19 @@ func (xc *XChainCore) PostTx(in *pb.TxStatus, hd *global.XContext) (*pb.CommonRe
 		xc.log.Debug("refused a connection at function call GenerateTx", "logid", in.Header.Logid)
 		return out, false
 	}
-
+	txid := in.GetTxid()
+	if txid == nil {
+		out.Header.Error = pb.XChainErrorEnum_CONNECT_REFUSE // 拒绝
+		xc.log.Debug("refused a tx with the txid being nil", "logid", in.GetHeader().GetLogid())
+		return out, false
+	}
+	txidStr := string(txid)
+	if _, exist := xc.txidCache.Get(txidStr); exist {
+		out.Header.Error = pb.XChainErrorEnum_TX_DUPLICATE_ERROR // tx重复
+		xc.log.Debug("refused to accept a repeated transaction recently")
+		return out, false
+	}
+	xc.txidCache.Set(txidStr, true, xc.txidCacheExpiredTime)
 	// 对Tx进行的签名, 1 如果utxo属于用户，则走原来的验证逻辑 2 如果utxo属于账户，则走账户acl验证逻辑
 	txValid, validErr := xc.Utxovm.VerifyTx(in.Tx)
 	if !txValid {
@@ -808,8 +898,8 @@ func (xc *XChainCore) PostTx(in *pb.TxStatus, hd *global.XContext) (*pb.CommonRe
 		return out, false
 	}
 	xc.Speed.Add("PostTx")
-	if xc.Utxovm.IsAsync() {
-		return out, xc.Utxovm.IsInUnConfirm(string(in.Txid))
+	if xc.Utxovm.IsAsync() || xc.Utxovm.IsAsyncBlock() {
+		return out, false //no need to repost tx immediately
 	}
 	return out, true
 }
@@ -934,6 +1024,15 @@ func (xc *XChainCore) GetBlockChainStatus(in *pb.BCStatus) *pb.BCStatus {
 		return out
 	}
 	out.Block = ib
+	// fetch all branches info
+	branchManager, branchErr := xc.Ledger.GetBranchInfo([]byte("0"), int64(0))
+	if branchErr != nil {
+		out.Header.Error = HandlerLedgerError(branchErr)
+		return out
+	}
+	for _, branchID := range branchManager {
+		out.BranchBlockid = append(out.BranchBlockid, fmt.Sprintf("%x", branchID))
+	}
 
 	return out
 }
@@ -979,6 +1078,23 @@ func (xc *XChainCore) QueryAccountACL(accountName string) (*pb.Acl, bool, error)
 		return nil, false, err
 	}
 	return acl, confirmed, nil
+}
+
+// QueryUtxoRecord get utxo record for an account
+func (xc *XChainCore) QueryUtxoRecord(accountName string, displayCount int64) (*pb.UtxoRecordDetail, error) {
+	defaultUtxoRecord := &pb.UtxoRecordDetail{Header: &pb.Header{}}
+	if xc == nil {
+		return defaultUtxoRecord, errors.New("xchaincore is nil")
+	}
+	if xc.Status() != global.Normal {
+		return defaultUtxoRecord, ErrNotReady
+	}
+	utxoRecord, err := xc.Utxovm.QueryUtxoRecord(accountName, displayCount)
+	if err != nil {
+		return defaultUtxoRecord, err
+	}
+
+	return utxoRecord, nil
 }
 
 // QueryAccountContainAK get all accounts contain a specific address

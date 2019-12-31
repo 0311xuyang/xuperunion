@@ -277,7 +277,7 @@ func (tp *TDpos) buildConfigs(xlog log.Logger, cfg *config.NodeConfig, consCfg m
 		}
 	} else {
 		tp.log.Warn("TDpos have no neturl info for proposers",
-			"neet_neturl", needNetURL)
+			"need_neturl", needNetURL)
 		if needNetURL {
 			return errors.New("config error, init_proposer_neturl could not be empty")
 		}
@@ -492,6 +492,9 @@ func (tp *TDpos) CheckMinerMatch(header *pb.Header, in *pb.InternalBlock) (bool,
 		string(in.Proposer), "blockid", fmt.Sprintf("%x", in.Blockid))
 	term, pos, _ := tp.minerScheduling(in.Timestamp)
 	if tp.isProposer(term, pos, in.Proposer) {
+		// curTermProposerProduceNumCache is not thread safe, lock before use it.
+		tp.mutex.Lock()
+		defer tp.mutex.Unlock()
 		// 当不是第一轮时需要和前面的
 		if in.CurTerm != 1 {
 			// 减少矿工50%概率恶意地输入时间
@@ -551,7 +554,7 @@ func (tp *TDpos) ProcessBeforeMiner(timestamp int64) (map[string]interface{}, bo
 					tp.log.Warn("ProcessBeforeMiner tip block query failed", "error", err)
 					return nil, false
 				}
-				err = tp.utxoVM.Walk(lastBlock.GetPreHash())
+				err = tp.utxoVM.Walk(lastBlock.GetPreHash(), false)
 				if err != nil {
 					tp.log.Warn("ProcessBeforeMiner utxo walk failed", "error", err)
 					return nil, false
@@ -784,11 +787,14 @@ func (tp *TDpos) initBFT(cfg *config.NodeConfig) error {
 			qcNeeded--
 			block, err := tp.ledger.QueryBlock(blockid)
 			if err != nil {
-				tp.log.Warn("initBFT: get block failed", "error", err)
+				tp.log.Warn("initBFT: get block failed", "error", err, "blockid", string(blockid))
 				return err
 			}
 			qc[qcNeeded] = block.GetJustify()
 			blockid = block.GetPreHash()
+			if blockid == nil {
+				break
+			}
 		}
 	}
 
@@ -825,9 +831,7 @@ func (tp *TDpos) initBFT(cfg *config.NodeConfig) error {
 
 func (tp *TDpos) isFirstblock(targetHeight int64) bool {
 	consStartHeight := tp.height
-	if consStartHeight == 0 {
-		consStartHeight++
-	}
+	consStartHeight++
 	tp.log.Debug("isFirstblock check", "consStartHeight", consStartHeight,
 		"targetHeight", targetHeight)
 	return consStartHeight == targetHeight
